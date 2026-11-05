@@ -1167,7 +1167,10 @@ class App(ctk.CTk):
                     except weather_features.WeatherServiceError:
                         air = None
                     for item in weather_features.build_alerts(forecast, air):
-                        key = f"{city['nom']}|{item['code']}|{item['validity']}"
+                        validity = item["validity"]
+                        if validity in ("now", "today"):
+                            validity = f"{validity}:{datetime.now():%Y-%m-%d}"
+                        key = f"{city['nom']}|{item['code']}|{validity}"
                         created = datetime.now().isoformat(timespec="minutes")
                         if database.register_alert_once(key, city["nom"], item["code"], item["title"],
                                 item["message"], item["severity"], created):
