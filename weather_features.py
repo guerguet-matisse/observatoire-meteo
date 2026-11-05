@@ -80,3 +80,81 @@ def air_quality_label(aqi: float | None) -> tuple[str, str]:
     if aqi <= 80: return "Dégradée", "#ffad66"
     if aqi <= 100: return "Mauvaise", "#ff8a4c"
     return "Très mauvaise", "#ff6b81"
+
+
+def build_alerts(forecast: dict, air: dict | None = None) -> list[dict]:
+    """Construit des alertes indicatives à partir des prévisions, pas des vigilances officielles."""
+    alerts: list[dict] = []
+    current = forecast.get("current", {}) if isinstance(forecast, dict) else {}
+    hourly = forecast.get("hourly", {}) if isinstance(forecast, dict) else {}
+    daily = forecast.get("daily", {}) if isinstance(forecast, dict) else {}
+
+    def number(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def add(code, validity, severity, title, message):
+        alerts.append({"code": code, "validity": str(validity), "severity": severity,
+                       "title": title, "message": message})
+
+    gust = number(current.get("wind_gusts_10m"))
+    wind = number(current.get("wind_speed_10m"))
+    temp = number(current.get("temperature_2m"))
+    if gust is not None and gust >= 85:
+        add("gust", "now", "danger" if gust >= 100 else "warning",
+            "Rafales violentes", f"Rafales actuellement estimées à {gust:.0f} km/h.")
+    elif wind is not None and wind >= 65:
+        add("wind-now", "now", "warning", "Vent fort",
+            f"Vent actuellement estimé à {wind:.0f} km/h.")
+    if temp is not None and temp <= 0:
+        add("frost-now", "now", "watch", "Risque de gel",
+            f"Température actuelle : {temp:.1f} °C.")
+    elif temp is not None and temp >= 35:
+        add("heat-now", "now", "warning", "Forte chaleur",
+            f"Température actuelle : {temp:.1f} °C.")
+
+    hours = hourly.get("time", [])
+    rain_probs = hourly.get("precipitation_probability", [])
+    for index, probability in enumerate(rain_probs[:3]):
+        value = number(probability)
+        if value is not None and value >= 80:
+            hour = hours[index] if index < len(hours) else f"heure-{index}"
+            add("rain-hour", hour, "warning", "Pluie probable prochainement",
+                f"Probabilité de précipitations : {value:.0f} % vers {str(hour).replace('T', ' ')}.")
+            break
+
+    days = daily.get("time", [])
+    for index, day in enumerate(days):
+        def day_value(key):
+            values = daily.get(key, [])
+            return number(values[index]) if index < len(values) else None
+        max_wind = day_value("wind_speed_10m_max")
+        rain = day_value("precipitation_probability_max")
+        uv = day_value("uv_index_max")
+        minimum = day_value("temperature_2m_min")
+        maximum = day_value("temperature_2m_max")
+        if max_wind is not None and max_wind >= 80:
+            add("wind-day", day, "danger" if max_wind >= 100 else "warning",
+                "Vent fort prévu", f"Vent maximal prévu : {max_wind:.0f} km/h le {day}.")
+        if rain is not None and rain >= 90:
+            add("rain-day", day, "watch", "Fort risque de pluie",
+                f"Probabilité maximale de pluie : {rain:.0f} % le {day}.")
+        if uv is not None and uv >= 8:
+            add("uv", day, "watch", "Indice UV élevé",
+                f"Indice UV maximal prévu : {uv:.0f} le {day}.")
+        if minimum is not None and minimum <= -2:
+            add("frost-day", day, "watch", "Gel possible",
+                f"Température minimale prévue : {minimum:.1f} °C le {day}.")
+        if maximum is not None and maximum >= 35:
+            add("heat-day", day, "warning", "Forte chaleur prévue",
+                f"Température maximale prévue : {maximum:.1f} °C le {day}.")
+
+    air_current = air.get("current", {}) if isinstance(air, dict) else {}
+    aqi = number(air_current.get("european_aqi"))
+    if aqi is not None and aqi > 100:
+        add("air-quality", "today", "warning", "Qualité de l'air très dégradée",
+            f"Indice européen de qualité de l'air : {aqi:.0f}.")
+    order = {"danger": 0, "warning": 1, "watch": 2}
+    return sorted(alerts, key=lambda item: order.get(item["severity"], 3))
