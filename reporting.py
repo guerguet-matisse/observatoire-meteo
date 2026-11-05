@@ -6,6 +6,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from xml.sax.saxutils import escape
 
 def create_pdf_report(city: str, forecast: dict, air: dict | None, destination: str) -> None:
     doc = SimpleDocTemplate(destination, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm,
@@ -14,7 +15,7 @@ def create_pdf_report(city: str, forecast: dict, air: dict | None, destination: 
     styles.add(ParagraphStyle(name="ReportTitle", parent=styles["Title"], alignment=TA_CENTER,
                               textColor=colors.HexColor("#243b70")))
     story = [Paragraph("Bulletin météorologique", styles["ReportTitle"]),
-             Paragraph(f"<b>{city}</b> · Généré le {datetime.now():%d/%m/%Y à %H:%M}", styles["Normal"]),
+             Paragraph(f"<b>{escape(city)}</b> · Généré le {datetime.now():%d/%m/%Y à %H:%M}", styles["Normal"]),
              Spacer(1, 8*mm), Paragraph("Conditions actuelles", styles["Heading2"])]
     current = forecast.get("current", {})
     story.append(Paragraph(f"Température : {current.get('temperature_2m','—')} °C · "
@@ -38,8 +39,8 @@ def create_pdf_report(city: str, forecast: dict, air: dict | None, destination: 
     story += [table, Spacer(1, 6*mm), Paragraph("Qualité de l'air", styles["Heading2"])]
     if air and isinstance(air.get("current"), dict):
         a = air["current"]
-        story.append(Paragraph(f"Indice européen : {a.get('european_aqi','—')} · PM2.5 : {a.get('pm2_5','—')} µg/m³ · "
-            f"PM10 : {a.get('pm10','—')} µg/m³ · NO₂ : {a.get('nitrogen_dioxide','—')} µg/m³ · "
+        story.append(Paragraph(f"Indice européen : {a.get('european_aqi','—')} · PM2.5 : {a.get('pm2_5','—')} ug/m3 · "
+            f"PM10 : {a.get('pm10','—')} µg/m³ · NO2 : {a.get('nitrogen_dioxide','—')} ug/m3 · "
             f"Ozone : {a.get('ozone','—')} µg/m³", styles["BodyText"]))
     else:
         story.append(Paragraph("Données non disponibles.", styles["BodyText"]))
