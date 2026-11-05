@@ -59,15 +59,15 @@ class WeatherFeatureTests(unittest.TestCase):
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["ville"], "Soissons")
                     self.assertAlmostEqual(rows[0]["temperature"], 12.5)
-                    self.assertTrue(database.register_alert_once(
-                        "Soissons|rain-day|2026-11-06", "Soissons", "rain-day",
-                        "Pluie", "Pluie probable", "watch", "2026-11-05T18:00"))
-                    self.assertFalse(database.register_alert_once(
-                        "Soissons|rain-day|2026-11-06", "Soissons", "rain-day",
-                        "Pluie", "Pluie probable", "watch", "2026-11-05T18:01"))
-                    self.assertEqual(len(database.recent_alerts()), 1)
-                    database.set_setting("windows_alerts", "1")
-                    self.assertEqual(database.get_setting("windows_alerts"), "1")
+                self.assertTrue(database.register_alert_once(
+                    "Soissons|rain-day|2026-11-06", "Soissons", "rain-day",
+                    "Pluie", "Pluie probable", "watch", "2026-11-05T18:00"))
+                self.assertFalse(database.register_alert_once(
+                    "Soissons|rain-day|2026-11-06", "Soissons", "rain-day",
+                    "Pluie", "Pluie probable", "watch", "2026-11-05T18:01"))
+                self.assertEqual(len(database.recent_alerts()), 1)
+                database.set_setting("windows_alerts", "1")
+                self.assertEqual(database.get_setting("windows_alerts"), "1")
 
 
 if __name__ == "__main__":
