@@ -45,3 +45,13 @@ python pipeline.py Paris Lille            # collecte en ligne de commande
 
 Les seuils d'alerte sont informatifs et ne remplacent pas les vigilances officielles de Météo-France.
 Les prévisions et données de qualité de l'air sont fournies par Open-Meteo.
+
+
+## Version 3.0 — Radar, vigilance et comparaison
+- Radar animé des précipitations autour de la ville sélectionnée (images passées RainViewer, fond OpenStreetMap).
+- Centre de vigilance avec détection indicative de pluie, rafales, vent fort, gel, chaleur, UV et qualité de l'air.
+- Notifications Windows activables/désactivables et historisées dans SQLite, sans répétition d'une même alerte.
+- Comparateur de toutes les villes suivies sur les conditions actuelles et les extrêmes des 7 prochains jours.
+- API : `/alertes/{ville}` et `/radar/frames`.
+
+Le radar public RainViewer fournit les images passées, sans prévision radar future. Le service est sans clé et destiné à un usage personnel/éducatif. Les alertes de l'application sont indicatives et ne constituent pas les vigilances officielles de Météo-France. Attribution radar : RainViewer. Fond cartographique : © OpenStreetMap contributors.
