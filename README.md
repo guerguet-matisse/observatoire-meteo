@@ -32,3 +32,16 @@ python pipeline.py Paris Lille            # collecte en ligne de commande
 ## Structure
 `models.py` Pydantic · `client.py` requests · `database.py` sqlite3 · `pipeline.py` · `metrics.py` métriques ·
 `main.py` FastAPI · `dashboard/app.py` Streamlit · `prometheus/` · `grafana/` · `docker-compose.yml`
+
+
+## Fonctionnalités avancées
+- Prévisions horaires sur 24 h et quotidiennes sur 7 jours.
+- Qualité de l'air : indice européen, PM2.5, PM10, NO₂ et ozone.
+- Alertes indicatives pour pluie, vent, UV, gel, chaleur et qualité de l'air.
+- Historique filtrable sur 24 h, 7 jours, 30 jours ou un an.
+- Export CSV des relevés et génération de bulletins PDF.
+- Endpoints FastAPI : `/previsions/{ville}` et `/qualite-air/{ville}`.
+- Cache mémoire de 10 minutes pour les prévisions et la qualité de l'air.
+
+Les seuils d'alerte sont informatifs et ne remplacent pas les vigilances officielles de Météo-France.
+Les prévisions et données de qualité de l'air sont fournies par Open-Meteo.

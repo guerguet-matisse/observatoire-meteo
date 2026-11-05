@@ -2,10 +2,12 @@
 
 Lancer :  python gui.py
 """
+import csv
 import queue
 import threading
 import tkinter as tk
 from datetime import datetime
+from tkinter import filedialog
 
 import customtkinter as ctk
 
@@ -41,6 +43,8 @@ except ImportError:  # La carte reste facultative si ses dépendances manquent.
 import client
 import database
 import pipeline
+import weather_features
+import reporting
 
 # ------------------------------------------------------------------ palette
 BG = "#0b0e1a"
@@ -331,6 +335,16 @@ class App(ctk.CTk):
         self.auto = ctk.CTkSwitch(foot, text="Actualisation auto (15 min)", font=font(12),
                                   text_color=MUTED, progress_color=ACCENT)
         self.auto.grid(row=2, column=0, sticky="w", pady=(14, 0))
+        self.forecast_btn = ctk.CTkButton(foot, text="☼  Prévisions & alertes", height=40,
+                                          corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER,
+                                          border_width=1, border_color=BORDER, text_color=SOFT,
+                                          font=font(13, "bold"), command=self.show_forecast)
+        self.forecast_btn.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.export_btn = ctk.CTkButton(foot, text="↓  Exporter l'historique CSV", height=36,
+                                        corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER,
+                                        border_width=1, border_color=BORDER, text_color=SOFT,
+                                        font=font(12), command=self.export_csv)
+        self.export_btn.grid(row=4, column=0, sticky="ew", pady=(8, 0))
 
     def _build_main(self):
         main = ctk.CTkFrame(self, fg_color="transparent")
@@ -358,6 +372,11 @@ class App(ctk.CTk):
                                          border_width=1, border_color=BORDER, text_color=TEXT,
                                          font=font(13, "bold"), command=self.refresh_current)
         self.refresh_btn.grid(row=0, column=1)
+        self.history_period = ctk.CTkOptionMenu(right, values=["24 h", "7 jours", "30 jours", "1 an"],
+            width=105, height=38, fg_color=CARD, button_color=BORDER, button_hover_color=CARD_HOVER,
+            command=self.change_history_period)
+        self.history_period.set("7 jours")
+        self.history_period.grid(row=0, column=2, padx=(10, 0))
 
         # cartes
         cards = ctk.CTkFrame(main, fg_color="transparent")
@@ -553,7 +572,9 @@ class App(ctk.CTk):
     def show_city(self, nom: str):
         conn = database.get_connection()
         try:
-            rows = database.releves_ville(conn, nom, 60)
+            period = self.history_period.get() if getattr(self, "history_period", None) else "7 jours"
+            days = {"24 h": 1, "7 jours": 7, "30 jours": 30, "1 an": 365}.get(period, 7)
+            rows = database.historique_ville(conn, nom, days, 5000)
             stats = database.stats_ville(conn, nom)
             ville = next((v for v in database.lister_villes(conn)
                           if v["nom"].lower() == nom.lower()), None)
@@ -701,6 +722,162 @@ class App(ctk.CTk):
                        GOOD if not ko else BAD)
 
         self._run(work, done)
+
+    def change_history_period(self, _value=None):
+        if self.current:
+            self.show_city(self.current)
+
+    def export_csv(self):
+        if not self.current:
+            self.toast("Sélectionne une ville avant l'export.", BAD)
+            return
+        days = {"24 h": 1, "7 jours": 7, "30 jours": 30, "1 an": 365}.get(self.history_period.get(), 7)
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+            filetypes=[("Fichier CSV", "*.csv")], initialfile=f"historique_{self.current}.csv")
+        if not path:
+            return
+        conn = database.get_connection()
+        try:
+            rows = database.historique_ville(conn, self.current, days, 10000)
+        finally:
+            conn.close()
+        with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(["Ville", "Date et heure", "Temperature (C)", "Vent (km/h)"])
+            writer.writerows([[r["ville"], r["date_heure"], r["temperature"], r["vitesse_vent"]] for r in rows])
+        self.toast(f"Export CSV créé : {len(rows)} relevé(s).", GOOD)
+
+    def show_forecast(self):
+        nom = self.current
+        if not nom:
+            villes = self._villes()
+            nom = villes[0]["nom"] if villes else None
+        if not nom:
+            self.toast("Ajoute d'abord une ville.", BAD)
+            return
+        conn = database.get_connection()
+        try:
+            ville = next((v for v in database.lister_villes(conn) if v["nom"].lower() == nom.lower()), None)
+        finally:
+            conn.close()
+        if not ville:
+            self.toast("Ville introuvable dans la base locale.", BAD)
+            return
+        window = ctk.CTkToplevel(self)
+        window.title(f"Prévisions météo · {nom}")
+        window.geometry("900x760")
+        window.minsize(720, 560)
+        window.configure(fg_color=BG)
+        window.transient(self)
+        self.forecast_window = window
+        content = ctk.CTkScrollableFrame(window, fg_color=BG, corner_radius=0)
+        content.pack(fill="both", expand=True, padx=20, pady=18)
+        content.grid_columnconfigure(0, weight=1)
+        self.forecast_content = content
+        self._forecast_data = None
+        self.forecast_status = ctk.CTkLabel(content, text="Chargement des prévisions…",
+                                            font=font(15), text_color=SOFT)
+        self.forecast_status.grid(row=0, column=0, sticky="w", pady=12)
+        actions = ctk.CTkFrame(content, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="ew", pady=8)
+        ctk.CTkButton(actions, text="Exporter le bulletin PDF", fg_color=ACCENT,
+                      command=self.export_pdf).pack(side="right")
+        def load():
+            forecast = weather_features.get_forecast(ville["latitude"], ville["longitude"])
+            try:
+                air = weather_features.get_air_quality(ville["latitude"], ville["longitude"])
+            except weather_features.WeatherServiceError:
+                air = None
+            return forecast, air
+        self._run(load, lambda result, error: self._forecast_loaded(nom, result, error))
+
+    def _forecast_loaded(self, nom, result, error):
+        if not hasattr(self, "forecast_window") or not self.forecast_window.winfo_exists():
+            return
+        if error:
+            self.forecast_status.configure(text=f"Échec du chargement : {error}")
+            return
+        forecast, air = result
+        self._forecast_data = (nom, forecast, air)
+        content = self.forecast_content
+        current = forecast.get("current", {})
+        daily = forecast.get("daily", {})
+        air_current = air.get("current", {}) if air else {}
+        aqi = air_current.get("european_aqi")
+        aqi_label, aqi_color = weather_features.air_quality_label(aqi)
+        self.forecast_status.configure(text=f"{nom} · Prévisions Open-Meteo sur 7 jours")
+        current_text = (f"{current.get('temperature_2m','—')} °C · Ressenti {current.get('apparent_temperature','—')} °C\n"
+            f"Humidité {current.get('relative_humidity_2m','—')} % · Vent {current.get('wind_speed_10m','—')} km/h · "
+            f"Rafales {current.get('wind_gusts_10m','—')} km/h · Pression {current.get('pressure_msl','—')} hPa")
+        ctk.CTkLabel(content, text=current_text, font=font(17, "bold"), text_color=TEXT,
+                     justify="left").grid(row=2, column=0, sticky="w", pady=10)
+        alerts = []
+        if float(current.get("wind_speed_10m") or 0) >= 60: alerts.append("Vent fort actuellement.")
+        if float(current.get("temperature_2m") or 99) <= 0: alerts.append("Température sous 0 °C : risque de gel.")
+        if aqi is not None and float(aqi) > 80: alerts.append(f"Qualité de l'air dégradée (indice {aqi}).")
+        for i, day in enumerate(daily.get("time", [])):
+            def dval(key):
+                values = daily.get(key, [])
+                return values[i] if i < len(values) else None
+            if dval("precipitation_probability_max") is not None and dval("precipitation_probability_max") >= 70:
+                alerts.append(f"{day} : risque élevé de pluie ({dval('precipitation_probability_max')} %).")
+            if dval("wind_speed_10m_max") is not None and dval("wind_speed_10m_max") >= 60:
+                alerts.append(f"{day} : vent soutenu ({dval('wind_speed_10m_max')} km/h).")
+            if dval("uv_index_max") is not None and dval("uv_index_max") >= 8:
+                alerts.append(f"{day} : indice UV élevé ({dval('uv_index_max')}).")
+            if dval("temperature_2m_min") is not None and dval("temperature_2m_min") <= -2:
+                alerts.append(f"{day} : gel possible ({dval('temperature_2m_min')} °C).")
+            if dval("temperature_2m_max") is not None and dval("temperature_2m_max") >= 35:
+                alerts.append(f"{day} : forte chaleur ({dval('temperature_2m_max')} °C).")
+        ctk.CTkLabel(content, text="ALERTES INDICATIVES\n" + ("\n".join("⚠ " + a for a in alerts[:12]) if alerts else
+            "Aucun seuil de vigilance interne détecté."), font=font(13), text_color="#ffd166",
+            justify="left", wraplength=820).grid(row=3, column=0, sticky="ew", pady=10)
+        air_text = (f"QUALITÉ DE L'AIR · {aqi_label}\nIndice européen : {aqi if aqi is not None else '—'} · "
+            f"PM2.5 : {air_current.get('pm2_5','—')} µg/m³ · PM10 : {air_current.get('pm10','—')} µg/m³ · "
+            f"NO₂ : {air_current.get('nitrogen_dioxide','—')} µg/m³ · Ozone : {air_current.get('ozone','—')} µg/m³")
+        ctk.CTkLabel(content, text=air_text, font=font(13), text_color=aqi_color,
+                     justify="left", wraplength=820).grid(row=4, column=0, sticky="ew", pady=10)
+        ctk.CTkLabel(content, text="PRÉVISIONS QUOTIDIENNES · 7 JOURS", font=font(15, "bold"),
+                     text_color=TEXT).grid(row=5, column=0, sticky="w", pady=(16, 6))
+        for i, day in enumerate(daily.get("time", [])):
+            def val(key):
+                values = daily.get(key, [])
+                return values[i] if i < len(values) else "—"
+            line = (f"{day} · {weather_features.weather_code_label(val('weather_code'))} · "
+                f"{val('temperature_2m_min')} / {val('temperature_2m_max')} °C · "
+                f"Pluie {val('precipitation_probability_max')} % ({val('precipitation_sum')} mm) · "
+                f"Vent {val('wind_speed_10m_max')} km/h · UV {val('uv_index_max')}")
+            ctk.CTkLabel(content, text=line, font=font(12), text_color=SOFT,
+                         anchor="w", wraplength=830).grid(row=6+i, column=0, sticky="ew", pady=5)
+        ctk.CTkLabel(content, text="PRÉVISIONS HORAIRES · 24 PROCHAINES HEURES",
+                     font=font(15, "bold"), text_color=TEXT).grid(row=13, column=0, sticky="w", pady=(18, 6))
+        hourly = forecast.get("hourly", {})
+        for i, hour in enumerate(hourly.get("time", [])[:24]):
+            def hval(key):
+                values = hourly.get(key, [])
+                return values[i] if i < len(values) else "—"
+            line = (f"{hour.replace('T',' ')} · {hval('temperature_2m')} °C · "
+                f"Pluie {hval('precipitation_probability')} % ({hval('precipitation')} mm) · "
+                f"Vent {hval('wind_speed_10m')} km/h · UV {hval('uv_index')}")
+            ctk.CTkLabel(content, text=line, font=font(11), text_color=SOFT,
+                         anchor="w").grid(row=14+i, column=0, sticky="ew", pady=3)
+        ctk.CTkLabel(content, text="Les seuils de vigilance sont indicatifs et ne remplacent pas les alertes officielles de Météo-France.",
+                     font=font(10), text_color=MUTED, wraplength=820).grid(row=38, column=0, sticky="w", pady=16)
+
+    def export_pdf(self):
+        if not self._forecast_data:
+            self.toast("Charge d'abord les prévisions.", BAD)
+            return
+        nom, forecast, air = self._forecast_data
+        path = filedialog.asksaveasfilename(defaultextension=".pdf",
+            filetypes=[("Document PDF", "*.pdf")], initialfile=f"bulletin_meteo_{nom}.pdf")
+        if not path: return
+        try:
+            reporting.create_pdf_report(nom, forecast, air, path)
+        except Exception as exc:
+            self.toast(f"Échec de création du PDF : {exc}", BAD)
+            return
+        self.toast("Bulletin PDF créé ✓", GOOD)
 
     def _auto_tick(self):
         if self.auto.get() and not self.busy:

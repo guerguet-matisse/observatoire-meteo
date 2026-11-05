@@ -15,6 +15,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 import client
 import database
 import pipeline
+import weather_features
 from models import ReleveOut, StatsOut, VilleOut
 
 log = logging.getLogger("observatoire")
@@ -132,3 +133,23 @@ def actualiser(ville: str):
     except client.ApiError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"ville": nom, "nouveau_releve": nouveau}
+
+
+@app.get("/previsions/{ville}", tags=["Prévisions"])
+def previsions_ville(ville: str):
+    """Prévisions météo horaires et quotidiennes sur sept jours."""
+    try:
+        place = client.geocoder(ville)
+        return weather_features.get_forecast(place.latitude, place.longitude)
+    except (client.ApiError, weather_features.WeatherServiceError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/qualite-air/{ville}", tags=["Qualité de l'air"])
+def qualite_air_ville(ville: str):
+    """Indice européen de qualité de l'air et principaux polluants."""
+    try:
+        place = client.geocoder(ville)
+        return weather_features.get_air_quality(place.latitude, place.longitude)
+    except (client.ApiError, weather_features.WeatherServiceError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

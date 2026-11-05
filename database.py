@@ -2,6 +2,7 @@
 import os
 import sqlite3
 import sys
+from datetime import datetime, timedelta
 
 # La base est stockée à côté du .exe (ou du script), quel que soit le dossier de lancement.
 BASE_DIR = (
@@ -98,3 +99,17 @@ def stats_ville(conn, nom: str):
            GROUP BY v.id""",
         (nom,),
     ).fetchone()
+
+
+def historique_ville(conn, nom: str, jours: int = 7, limite: int = 5000):
+    """Retourne les relevés récents d'une ville, du plus récent au plus ancien."""
+    jours = max(1, min(int(jours), 365))
+    limite = max(1, min(int(limite), 10000))
+    debut = (datetime.now() - timedelta(days=jours)).isoformat(timespec="minutes")
+    return conn.execute(
+        """SELECT r.id, v.nom AS ville, r.temperature, r.vitesse_vent, r.date_heure
+           FROM releves r JOIN villes v ON v.id = r.ville_id
+           WHERE v.nom = ? COLLATE NOCASE AND r.date_heure >= ?
+           ORDER BY r.date_heure DESC LIMIT ?""",
+        (nom, debut, limite),
+    ).fetchall()
