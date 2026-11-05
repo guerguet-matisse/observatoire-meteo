@@ -1,0 +1,587 @@
+"""Interface graphique CustomTkinter de L'Observatoire Météo.
+
+Lancer :  python gui.py
+"""
+import queue
+import threading
+import tkinter as tk
+from datetime import datetime
+
+import customtkinter as ctk
+
+import client
+import database
+import pipeline
+
+# ------------------------------------------------------------------ palette
+BG = "#0b0e1a"
+SIDEBAR = "#10142a"
+CARD = "#171c36"
+CARD_HOVER = "#1d2344"
+BORDER = "#262d55"
+TEXT = "#eef0ff"
+SOFT = "#b9c0ea"
+MUTED = "#7f89bd"
+ACCENT = "#6c8cff"
+GOOD = "#4cd7a8"
+BAD = "#ff6b81"
+FONT = "Segoe UI"
+
+TEMP_STOPS = [
+    (-10, "#7aa2ff"), (0, "#5ac8fa"), (10, "#4cd7a8"),
+    (20, "#ffd166"), (30, "#ff8a4c"), (40, "#ff4d4d"),
+]
+
+
+def _rgb(h: str):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def blend(c1: str, c2: str, t: float) -> str:
+    a, b = _rgb(c1), _rgb(c2)
+    return "#%02x%02x%02x" % tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def temp_color(t: float) -> str:
+    """Couleur dégradée du bleu glacé au rouge brûlant selon la température."""
+    if t <= TEMP_STOPS[0][0]:
+        return TEMP_STOPS[0][1]
+    for (t0, c0), (t1, c1) in zip(TEMP_STOPS, TEMP_STOPS[1:]):
+        if t <= t1:
+            return blend(c0, c1, (t - t0) / (t1 - t0))
+    return TEMP_STOPS[-1][1]
+
+
+def wind_info(v: float):
+    if v < 12:
+        return "Calme", GOOD
+    if v < 29:
+        return "Brise légère", GOOD
+    if v < 50:
+        return "Vent modéré", "#ffd166"
+    if v < 75:
+        return "Vent fort", "#ff8a4c"
+    return "Tempête", BAD
+
+
+def fmt_dt(s: str, fmt: str = "%d/%m %H:%M") -> str:
+    try:
+        return datetime.fromisoformat(s).strftime(fmt)
+    except ValueError:
+        return s
+
+
+def font(size: int, weight: str = "normal"):
+    return ctk.CTkFont(family=FONT, size=size, weight=weight)
+
+
+# ------------------------------------------------------------------ graphique
+class LineChart(tk.Canvas):
+    """Courbe lissée dessinée à la main (aucune dépendance à matplotlib), avec infobulle."""
+
+    PAD_L, PAD_R, PAD_T, PAD_B = 46, 22, 22, 34
+
+    def __init__(self, master, **kw):
+        super().__init__(master, bg=CARD, highlightthickness=0, **kw)
+        self.points: list[tuple[str, float]] = []
+        self.color = ACCENT
+        self._coords: list[tuple[float, float]] = []
+        self.bind("<Configure>", lambda e: self.redraw())
+        self.bind("<Motion>", self._hover)
+        self.bind("<Leave>", lambda e: self.delete("tip"))
+
+    def set_data(self, points, color):
+        self.points, self.color = points, color
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w < 120 or h < 100:
+            return
+        if not self.points:
+            self.create_text(w / 2, h / 2, text="Pas encore de relevés",
+                             fill=MUTED, font=(FONT, 12))
+            return
+
+        vals = [v for _, v in self.points]
+        lo, hi = min(vals), max(vals)
+        if hi - lo < 2:
+            mid = (hi + lo) / 2
+            lo, hi = mid - 1, mid + 1
+        pad = (hi - lo) * 0.18
+        lo, hi = lo - pad, hi + pad
+
+        x0, x1 = self.PAD_L, w - self.PAD_R
+        y0, y1 = self.PAD_T, h - self.PAD_B
+        n = len(self.points)
+
+        for i in range(5):                                   # grille + axe Y
+            y = y0 + (y1 - y0) * i / 4
+            self.create_line(x0, y, x1, y, fill=BORDER, dash=(2, 4))
+            self.create_text(x0 - 10, y, text=f"{hi - (hi - lo) * i / 4:.0f}°",
+                             fill=MUTED, anchor="e", font=(FONT, 9))
+
+        def px(i):
+            return x0 + (x1 - x0) * (i / (n - 1) if n > 1 else 0.5)
+
+        def py(v):
+            return y1 - (y1 - y0) * (v - lo) / (hi - lo)
+
+        self._coords = [(px(i), py(v)) for i, (_, v) in enumerate(self.points)]
+
+        if n > 1:                                            # aire sous la courbe
+            poly = [c for xy in self._coords for c in xy]
+            poly += [self._coords[-1][0], y1, self._coords[0][0], y1]
+            self.create_polygon(poly, fill=blend(CARD, self.color, 0.16), outline="")
+            flat = [c for xy in self._coords for c in xy]
+            self.create_line(*flat, fill=blend(CARD, self.color, 0.35), width=7,
+                             smooth=True, capstyle="round")
+            self.create_line(*flat, fill=self.color, width=3, smooth=True, capstyle="round")
+
+        for x, y in self._coords:                            # points
+            self.create_oval(x - 4.5, y - 4.5, x + 4.5, y + 4.5,
+                             fill=self.color, outline=CARD, width=2)
+
+        idx = sorted({0, n // 2, n - 1})                     # axe X
+        for i in idx:
+            anchor = "w" if i == 0 and n > 1 else ("e" if i == n - 1 and n > 1 else "center")
+            self.create_text(self._coords[i][0], y1 + 18, text=self.points[i][0],
+                             fill=MUTED, anchor=anchor, font=(FONT, 9))
+
+    def _hover(self, e):
+        self.delete("tip")
+        if not self._coords:
+            return
+        i = min(range(len(self._coords)), key=lambda k: abs(self._coords[k][0] - e.x))
+        x, y = self._coords[i]
+        label, val = self.points[i]
+        self.create_line(x, self.PAD_T, x, self.winfo_height() - self.PAD_B,
+                         fill=SOFT, dash=(3, 3), tags="tip")
+        self.create_oval(x - 7, y - 7, x + 7, y + 7, fill=TEXT, outline=self.color,
+                         width=3, tags="tip")
+        bw, bh = 118, 46
+        bx = min(max(x - bw / 2, 4), self.winfo_width() - bw - 4)
+        by = y - bh - 16 if y - bh - 16 > 4 else y + 16
+        self.create_rectangle(bx, by, bx + bw, by + bh, fill="#0b0e1a",
+                              outline=self.color, width=1, tags="tip")
+        self.create_text(bx + bw / 2, by + 14, text=label, fill=MUTED,
+                         font=(FONT, 9), tags="tip")
+        self.create_text(bx + bw / 2, by + 32, text=f"{val:.1f} °C", fill=TEXT,
+                         font=(FONT, 12, "bold"), tags="tip")
+
+
+# ------------------------------------------------------------------ widgets
+class StatCard(ctk.CTkFrame):
+    def __init__(self, master, title: str):
+        super().__init__(master, fg_color=CARD, corner_radius=20,
+                         border_width=1, border_color=BORDER)
+        self.bar = ctk.CTkFrame(self, width=34, height=4, corner_radius=2, fg_color=ACCENT)
+        self.bar.grid(row=0, column=0, sticky="w", padx=20, pady=(18, 0))
+        ctk.CTkLabel(self, text=title.upper(), font=font(11, "bold"),
+                     text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20, pady=(10, 0))
+        self.value = ctk.CTkLabel(self, text="–", font=font(34, "bold"), text_color=TEXT)
+        self.value.grid(row=2, column=0, sticky="w", padx=20)
+        self.sub = ctk.CTkLabel(self, text="", font=font(12), text_color=MUTED)
+        self.sub.grid(row=3, column=0, sticky="w", padx=20, pady=(0, 18))
+
+    def set(self, value: str, sub: str = "", color: str = ACCENT):
+        self.bar.configure(fg_color=color)
+        self.value.configure(text=value)
+        self.sub.configure(text=sub)
+
+
+class CityRow(ctk.CTkFrame):
+    def __init__(self, master, nom, temp, selected, on_click):
+        super().__init__(master, fg_color=CARD if selected else "transparent",
+                         corner_radius=12, height=46)
+        self.selected = selected
+        self.grid_columnconfigure(0, weight=1)
+        self.name = ctk.CTkLabel(self, text=nom, anchor="w", font=font(14, "bold" if selected else "normal"),
+                                 text_color=TEXT if selected else SOFT)
+        self.name.grid(row=0, column=0, sticky="w", padx=(14, 6), pady=11)
+        self.temp = ctk.CTkLabel(self, text="–" if temp is None else f"{temp:.0f}°",
+                                 font=font(14, "bold"),
+                                 text_color=MUTED if temp is None else temp_color(temp))
+        self.temp.grid(row=0, column=1, padx=(6, 14))
+        for w in (self, self.name, self.temp):
+            w.bind("<Button-1>", lambda e, n=nom: on_click(n))
+            w.bind("<Enter>", self._enter)
+            w.bind("<Leave>", self._leave)
+
+    def _enter(self, _):
+        if not self.selected:
+            self.configure(fg_color=CARD_HOVER)
+
+    def _leave(self, _):
+        if not self.selected:
+            self.configure(fg_color="transparent")
+
+
+# ------------------------------------------------------------------ application
+class App(ctk.CTk):
+    AUTO_MS = 15 * 60 * 1000
+
+    def __init__(self):
+        super().__init__(fg_color=BG)
+        ctk.set_appearance_mode("dark")
+        self.title("Observatoire Météo")
+        self.geometry("1240x800")
+        self.minsize(1020, 680)
+
+        self.current: str | None = None
+        self.busy = False
+        self._q: queue.Queue = queue.Queue()
+        self._toast_job = None
+
+        database.init_db()
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self._build_sidebar()
+        self._build_main()
+
+        self.reload_cities()
+        villes = self._villes()
+        if villes:
+            self.select_city(villes[0]["nom"])
+        else:
+            self._show_empty(True)
+
+        self.after(100, self._poll)
+        self.after(self.AUTO_MS, self._auto_tick)
+
+    # ---------------------------------------------------------- construction
+    def _build_sidebar(self):
+        sb = ctk.CTkFrame(self, width=300, fg_color=SIDEBAR, corner_radius=0)
+        sb.grid(row=0, column=0, sticky="nsew")
+        sb.grid_propagate(False)
+        sb.grid_columnconfigure(0, weight=1)
+        sb.grid_rowconfigure(4, weight=1)
+
+        brand = ctk.CTkFrame(sb, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="ew", padx=24, pady=(28, 0))
+        ctk.CTkLabel(brand, text="Observatoire", font=font(26, "bold"),
+                     text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(brand, text="Météo en temps réel · Open-Meteo", font=font(12),
+                     text_color=MUTED).pack(anchor="w")
+
+        self.entry = ctk.CTkEntry(sb, placeholder_text="Ajouter une ville…", height=44,
+                                  corner_radius=14, fg_color=CARD, border_color=BORDER,
+                                  border_width=1, text_color=TEXT, font=font(14))
+        self.entry.grid(row=1, column=0, sticky="ew", padx=24, pady=(28, 10))
+        self.entry.bind("<Return>", lambda e: self.add_city())
+
+        self.add_btn = ctk.CTkButton(sb, text="＋  Ajouter / actualiser", height=44,
+                                     corner_radius=14, fg_color=ACCENT, hover_color="#5878e6",
+                                     font=font(14, "bold"), command=self.add_city)
+        self.add_btn.grid(row=2, column=0, sticky="ew", padx=24)
+
+        ctk.CTkLabel(sb, text="VILLES SUIVIES", font=font(11, "bold"),
+                     text_color=MUTED).grid(row=3, column=0, sticky="w", padx=26, pady=(28, 6))
+
+        self.city_list = ctk.CTkScrollableFrame(sb, fg_color="transparent",
+                                                scrollbar_button_color=BORDER,
+                                                scrollbar_button_hover_color=MUTED)
+        self.city_list.grid(row=4, column=0, sticky="nsew", padx=(14, 8))
+        self.city_list.grid_columnconfigure(0, weight=1)
+
+        foot = ctk.CTkFrame(sb, fg_color="transparent")
+        foot.grid(row=5, column=0, sticky="ew", padx=24, pady=(10, 24))
+        foot.grid_columnconfigure(0, weight=1)
+        self.all_btn = ctk.CTkButton(foot, text="⟳  Tout actualiser", height=40,
+                                     corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER,
+                                     border_width=1, border_color=BORDER, text_color=SOFT,
+                                     font=font(13, "bold"), command=self.refresh_all)
+        self.all_btn.grid(row=0, column=0, sticky="ew")
+        self.auto = ctk.CTkSwitch(foot, text="Actualisation auto (15 min)", font=font(12),
+                                  text_color=MUTED, progress_color=ACCENT)
+        self.auto.grid(row=1, column=0, sticky="w", pady=(14, 0))
+
+    def _build_main(self):
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.grid(row=0, column=1, sticky="nsew", padx=32, pady=28)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(2, weight=1)
+        self.main = main
+
+        # en-tête
+        head = ctk.CTkFrame(main, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew")
+        head.grid_columnconfigure(0, weight=1)
+        self.city_label = ctk.CTkLabel(head, text="", font=font(36, "bold"), text_color=TEXT, anchor="w")
+        self.city_label.grid(row=0, column=0, sticky="w")
+        self.meta_label = ctk.CTkLabel(head, text="", font=font(13), text_color=MUTED, anchor="w")
+        self.meta_label.grid(row=1, column=0, sticky="w")
+        right = ctk.CTkFrame(head, fg_color="transparent")
+        right.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.progress = ctk.CTkProgressBar(right, mode="indeterminate", width=120, height=6,
+                                           progress_color=ACCENT, fg_color=BORDER)
+        self.progress.grid(row=0, column=0, padx=(0, 16))
+        self.progress.grid_remove()
+        self.refresh_btn = ctk.CTkButton(right, text="⟳  Actualiser", width=140, height=42,
+                                         corner_radius=14, fg_color=CARD, hover_color=CARD_HOVER,
+                                         border_width=1, border_color=BORDER, text_color=TEXT,
+                                         font=font(13, "bold"), command=self.refresh_current)
+        self.refresh_btn.grid(row=0, column=1)
+
+        # cartes
+        cards = ctk.CTkFrame(main, fg_color="transparent")
+        cards.grid(row=1, column=0, sticky="ew", pady=(22, 18))
+        for i in range(4):
+            cards.grid_columnconfigure(i, weight=1, uniform="cards")
+        self.c_temp = StatCard(cards, "Température")
+        self.c_wind = StatCard(cards, "Vent")
+        self.c_avg = StatCard(cards, "Moyenne")
+        self.c_range = StatCard(cards, "Min / Max")
+        for i, c in enumerate((self.c_temp, self.c_wind, self.c_avg, self.c_range)):
+            c.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 7, 0 if i == 3 else 7))
+
+        # graphique + tableau
+        bottom = ctk.CTkFrame(main, fg_color="transparent")
+        bottom.grid(row=2, column=0, sticky="nsew")
+        bottom.grid_columnconfigure(0, weight=3)
+        bottom.grid_columnconfigure(1, weight=2, minsize=280)
+        bottom.grid_rowconfigure(0, weight=1)
+
+        chart_panel = ctk.CTkFrame(bottom, fg_color=CARD, corner_radius=20,
+                                   border_width=1, border_color=BORDER)
+        chart_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+        chart_panel.grid_columnconfigure(0, weight=1)
+        chart_panel.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(chart_panel, text="Évolution de la température", font=font(15, "bold"),
+                     text_color=TEXT).grid(row=0, column=0, sticky="w", padx=22, pady=(18, 0))
+        self.chart = LineChart(chart_panel)
+        self.chart.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 12))
+
+        table_panel = ctk.CTkFrame(bottom, fg_color=CARD, corner_radius=20,
+                                   border_width=1, border_color=BORDER)
+        table_panel.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
+        table_panel.grid_columnconfigure(0, weight=1)
+        table_panel.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(table_panel, text="Derniers relevés", font=font(15, "bold"),
+                     text_color=TEXT).grid(row=0, column=0, sticky="w", padx=22, pady=(18, 8))
+        hdr = ctk.CTkFrame(table_panel, fg_color="transparent")
+        hdr.grid(row=1, column=0, sticky="ew", padx=22)
+        for c, (t, a) in enumerate((("DATE", "w"), ("TEMP.", "e"), ("VENT", "e"))):
+            hdr.grid_columnconfigure(c, weight=1)
+            ctk.CTkLabel(hdr, text=t, font=font(10, "bold"), text_color=MUTED,
+                         anchor=a).grid(row=0, column=c, sticky=a)
+        self.table = ctk.CTkScrollableFrame(table_panel, fg_color="transparent",
+                                            scrollbar_button_color=BORDER,
+                                            scrollbar_button_hover_color=MUTED)
+        self.table.grid(row=2, column=0, sticky="nsew", padx=(12, 6), pady=(4, 12))
+        self.table.grid_columnconfigure(0, weight=1)
+
+        # message
+        self.toast_label = ctk.CTkLabel(main, text="", font=font(13, "bold"), text_color=GOOD, anchor="w")
+        self.toast_label.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+
+        # état vide
+        self.empty = ctk.CTkLabel(
+            self, text="Aucune ville pour l'instant\n\nTape un nom dans la barre de gauche\npuis clique sur « Ajouter / actualiser »",
+            font=font(18), text_color=MUTED, justify="center")
+
+    # ---------------------------------------------------------- données
+    def _villes(self):
+        conn = database.get_connection()
+        try:
+            return database.lister_villes(conn)
+        finally:
+            conn.close()
+
+    def reload_cities(self, select: str | None = None):
+        conn = database.get_connection()
+        try:
+            villes = database.lister_villes(conn)
+            last = {v["nom"]: (database.releves_ville(conn, v["nom"], 1) or [None])[0] for v in villes}
+        finally:
+            conn.close()
+        if select:
+            self.current = select
+        for w in self.city_list.winfo_children():
+            w.destroy()
+        for i, v in enumerate(villes):
+            r = last[v["nom"]]
+            CityRow(self.city_list, v["nom"], r["temperature"] if r else None,
+                    v["nom"].lower() == (self.current or "").lower(),
+                    self.select_city).grid(row=i, column=0, sticky="ew", pady=2)
+
+    def select_city(self, nom: str):
+        self.current = nom
+        self._show_empty(False)
+        self.reload_cities()
+        self.show_city(nom)
+
+    def _show_empty(self, on: bool):
+        if on:
+            self.main.grid_remove()
+            self.empty.grid(row=0, column=1)
+        else:
+            self.empty.grid_remove()
+            self.main.grid()
+
+    def show_city(self, nom: str):
+        conn = database.get_connection()
+        try:
+            rows = database.releves_ville(conn, nom, 60)
+            stats = database.stats_ville(conn, nom)
+            ville = next((v for v in database.lister_villes(conn)
+                          if v["nom"].lower() == nom.lower()), None)
+        finally:
+            conn.close()
+
+        self.city_label.configure(text=nom)
+        meta = ""
+        if ville:
+            ns = "N" if ville["latitude"] >= 0 else "S"
+            eo = "E" if ville["longitude"] >= 0 else "O"
+            meta = f"{abs(ville['latitude']):.2f}°{ns}  ·  {abs(ville['longitude']):.2f}°{eo}"
+        if rows:
+            meta += f"  ·  {stats['nb_releves']} relevé(s)  ·  dernier : {fmt_dt(rows[0]['date_heure'])}"
+        self.meta_label.configure(text=meta)
+
+        if rows:
+            last = rows[0]
+            t, v = last["temperature"], last["vitesse_vent"]
+            label, wcol = wind_info(v)
+            self.c_temp.set(f"{t:.1f}°C", "Dernier relevé", temp_color(t))
+            self.c_wind.set(f"{v:.0f} km/h", label, wcol)
+            self.c_avg.set(f"{stats['temperature_moyenne']:.1f}°C",
+                           f"sur {stats['nb_releves']} relevé(s)",
+                           temp_color(stats["temperature_moyenne"]))
+            amp = stats["temperature_max"] - stats["temperature_min"]
+            self.c_range.set(f"{stats['temperature_min']:.0f}° / {stats['temperature_max']:.0f}°",
+                             f"amplitude {amp:.1f}°", ACCENT)
+            self.chart.set_data([(fmt_dt(r["date_heure"]), r["temperature"]) for r in reversed(rows)],
+                                temp_color(t))
+        else:
+            for c in (self.c_temp, self.c_wind, self.c_avg, self.c_range):
+                c.set("–", "Aucun relevé", MUTED)
+            self.chart.set_data([], ACCENT)
+
+        for w in self.table.winfo_children():
+            w.destroy()
+        for i, r in enumerate(rows[:40]):
+            row = ctk.CTkFrame(self.table, fg_color=CARD_HOVER if i % 2 == 0 else "transparent",
+                               corner_radius=8)
+            row.grid(row=i, column=0, sticky="ew", pady=1)
+            for c in range(3):
+                row.grid_columnconfigure(c, weight=1, uniform="t")
+            ctk.CTkLabel(row, text=fmt_dt(r["date_heure"]), font=font(12), text_color=SOFT,
+                         anchor="w").grid(row=0, column=0, sticky="w", padx=(10, 0), pady=6)
+            ctk.CTkLabel(row, text=f"{r['temperature']:.1f}°", font=font(12, "bold"),
+                         text_color=temp_color(r["temperature"]),
+                         anchor="e").grid(row=0, column=1, sticky="e")
+            ctk.CTkLabel(row, text=f"{r['vitesse_vent']:.0f} km/h", font=font(12),
+                         text_color=SOFT, anchor="e").grid(row=0, column=2, sticky="e", padx=(0, 10))
+
+    # ---------------------------------------------------------- actions asynchrones
+    def _run(self, func, on_done):
+        if self.busy:
+            return
+        self._set_busy(True)
+
+        def worker():
+            try:
+                self._q.put((on_done, func(), None))
+            except Exception as e:               # noqa: BLE001 - remonté à l'interface
+                self._q.put((on_done, None, e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll(self):
+        try:
+            while True:
+                cb, res, err = self._q.get_nowait()
+                self._set_busy(False)
+                cb(res, err)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll)
+
+    def _set_busy(self, busy: bool):
+        self.busy = busy
+        state = "disabled" if busy else "normal"
+        for b in (self.add_btn, self.refresh_btn, self.all_btn):
+            b.configure(state=state)
+        if busy:
+            self.progress.grid()
+            self.progress.start()
+        else:
+            self.progress.stop()
+            self.progress.grid_remove()
+
+    def _error_text(self, err: Exception) -> str:
+        return str(err) if isinstance(err, client.ApiError) else f"Erreur : {err}"
+
+    def add_city(self):
+        nom = self.entry.get().strip()
+        if not nom:
+            self.toast("Écris le nom d'une ville.", BAD)
+            return
+        self._fetch(nom)
+
+    def refresh_current(self):
+        if self.current:
+            self._fetch(self.current)
+
+    def _fetch(self, nom: str):
+        def done(res, err):
+            if err:
+                self.toast(self._error_text(err), BAD)
+                return
+            vrai_nom, nouveau = res
+            self.entry.delete(0, "end")
+            self._show_empty(False)
+            self.current = vrai_nom
+            self.reload_cities()
+            self.show_city(vrai_nom)
+            self.toast("Nouveau relevé enregistré ✓" if nouveau
+                       else "Déjà à jour : relevé de cette heure déjà en base", GOOD if nouveau else SOFT)
+
+        self._run(lambda: pipeline.collecter_ville(nom), done)
+
+    def refresh_all(self):
+        noms = [v["nom"] for v in self._villes()]
+        if not noms:
+            self.toast("Aucune ville à actualiser.", BAD)
+            return
+
+        def work():
+            ok = ko = 0
+            for n in noms:
+                try:
+                    pipeline.collecter_ville(n)
+                    ok += 1
+                except client.ApiError:
+                    ko += 1
+            return ok, ko
+
+        def done(res, err):
+            if err:
+                self.toast(self._error_text(err), BAD)
+                return
+            ok, ko = res
+            self.reload_cities()
+            if self.current:
+                self.show_city(self.current)
+            self.toast(f"{ok} ville(s) actualisée(s)" + (f", {ko} en échec" if ko else " ✓"),
+                       GOOD if not ko else BAD)
+
+        self._run(work, done)
+
+    def _auto_tick(self):
+        if self.auto.get() and not self.busy:
+            self.refresh_all()
+        self.after(self.AUTO_MS, self._auto_tick)
+
+    def toast(self, msg: str, color: str = GOOD):
+        self.toast_label.configure(text=msg, text_color=color)
+        if self._toast_job:
+            self.after_cancel(self._toast_job)
+        self._toast_job = self.after(5000, lambda: self.toast_label.configure(text=""))
+
+
+if __name__ == "__main__":
+    App().mainloop()

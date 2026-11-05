@@ -1,0 +1,6 @@
+requests
+pydantic>=2
+fastapi
+uvicorn[standard]
+prometheus-client
+prometheus-fastapi-instrumentator
