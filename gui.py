@@ -432,8 +432,13 @@ class App(ctk.CTk):
             map_panel, corner_radius=16, use_database_only=False
         )
         self.map_widget.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        ctk.CTkLabel(
+            map_panel, text="© OpenStreetMap contributors",
+            font=font(10), text_color=SOFT, fg_color=CARD,
+            corner_radius=6,
+        ).place(relx=0.99, rely=0.985, anchor="se")
         self.map_widget.set_tile_server(
-            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png", max_zoom=19
+            "https://tile.openstreetmap.org/{z}/{x}/{y}.png", max_zoom=19
         )
         self.map_widget.set_position(46.603354, 1.888334)
         self.map_widget.set_zoom(6)
