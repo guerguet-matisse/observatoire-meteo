@@ -9,6 +9,11 @@ from datetime import datetime
 
 import customtkinter as ctk
 
+try:
+    import tkintermapview
+except ImportError:  # La carte reste facultative si la dépendance n'est pas installée.
+    tkintermapview = None
+
 import client
 import database
 import pipeline
@@ -240,6 +245,7 @@ class App(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
         self._build_sidebar()
         self._build_main()
+        self._build_map_view()
 
         self.reload_cities()
         villes = self._villes()
@@ -289,14 +295,18 @@ class App(ctk.CTk):
         foot = ctk.CTkFrame(sb, fg_color="transparent")
         foot.grid(row=5, column=0, sticky="ew", padx=24, pady=(10, 24))
         foot.grid_columnconfigure(0, weight=1)
+        self.map_btn = ctk.CTkButton(foot, text="⌖  Carte interactive", height=40,
+                                     corner_radius=12, fg_color=ACCENT, hover_color="#5878e6",
+                                     text_color=TEXT, font=font(13, "bold"), command=self.show_map)
+        self.map_btn.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         self.all_btn = ctk.CTkButton(foot, text="⟳  Tout actualiser", height=40,
                                      corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER,
                                      border_width=1, border_color=BORDER, text_color=SOFT,
                                      font=font(13, "bold"), command=self.refresh_all)
-        self.all_btn.grid(row=0, column=0, sticky="ew")
+        self.all_btn.grid(row=1, column=0, sticky="ew")
         self.auto = ctk.CTkSwitch(foot, text="Actualisation auto (15 min)", font=font(12),
                                   text_color=MUTED, progress_color=ACCENT)
-        self.auto.grid(row=1, column=0, sticky="w", pady=(14, 0))
+        self.auto.grid(row=2, column=0, sticky="w", pady=(14, 0))
 
     def _build_main(self):
         main = ctk.CTkFrame(self, fg_color="transparent")
@@ -381,6 +391,96 @@ class App(ctk.CTk):
         self.empty = ctk.CTkLabel(
             self, text="Aucune ville pour l'instant\n\nTape un nom dans la barre de gauche\npuis clique sur « Ajouter / actualiser »",
             font=font(18), text_color=MUTED, justify="center")
+
+    def _build_map_view(self):
+        """Construit la page cartographique dans la fenêtre principale."""
+        self.map_view = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.map_view.grid(row=0, column=1, sticky="nsew", padx=32, pady=28)
+        self.map_view.grid_columnconfigure(0, weight=1)
+        self.map_view.grid_rowconfigure(1, weight=1)
+        self.map_view.grid_remove()
+
+        header = ctk.CTkFrame(self.map_view, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text="Carte météorologique", font=font(30, "bold"),
+                     text_color=TEXT).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(header, text="Clique sur un marqueur pour consulter le dernier relevé",
+                     font=font(13), text_color=MUTED).grid(row=1, column=0, sticky="w")
+        ctk.CTkButton(header, text="↩  Tableau de bord", width=160, height=40,
+                      corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER,
+                      border_width=1, border_color=BORDER, text_color=TEXT,
+                      font=font(13, "bold"), command=self.show_dashboard).grid(
+                          row=0, column=1, rowspan=2, sticky="e")
+
+        map_panel = ctk.CTkFrame(self.map_view, fg_color=CARD, corner_radius=20,
+                                 border_width=1, border_color=BORDER)
+        map_panel.grid(row=1, column=0, sticky="nsew")
+        map_panel.grid_rowconfigure(0, weight=1)
+        map_panel.grid_columnconfigure(0, weight=1)
+
+        if tkintermapview is None:
+            ctk.CTkLabel(
+                map_panel,
+                text="La carte nécessite tkintermapview.\n\nInstalle les dépendances avec :\npip install -r requirements.txt",
+                font=font(16), text_color=SOFT, justify="center",
+            ).grid(row=0, column=0, sticky="nsew", padx=24, pady=24)
+            self.map_widget = None
+            return
+
+        self.map_widget = tkintermapview.TkinterMapView(
+            map_panel, corner_radius=16, use_database_only=False
+        )
+        self.map_widget.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.map_widget.set_tile_server(
+            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png", max_zoom=19
+        )
+        self.map_widget.set_position(46.603354, 1.888334)
+        self.map_widget.set_zoom(6)
+        self.refresh_map()
+
+    def show_map(self):
+        self.main.grid_remove()
+        self.map_view.grid()
+        self.refresh_map()
+
+    def show_dashboard(self):
+        self.map_view.grid_remove()
+        self.main.grid()
+
+    def refresh_map(self):
+        """Recharge les marqueurs depuis les villes et relevés présents dans SQLite."""
+        if self.map_widget is None:
+            return
+        self.map_widget.delete_all_marker()
+        conn = database.get_connection()
+        try:
+            villes = database.lister_villes(conn)
+            for ville in villes:
+                releves = database.releves_ville(conn, ville["nom"], 1)
+                if releves:
+                    releve = releves[0]
+                    temperature = releve["temperature"]
+                    vent = releve["vitesse_vent"]
+                    details = (
+                        f"{ville['nom']}\n"
+                        f"Température : {temperature:.1f} °C\n"
+                        f"Vent : {vent:.0f} km/h\n"
+                        f"Relevé : {fmt_dt(releve['date_heure'])}"
+                    )
+                    color = temp_color(temperature)
+                else:
+                    details = f"{ville['nom']}\nAucun relevé disponible"
+                    color = MUTED
+                self.map_widget.set_marker(
+                    ville["latitude"], ville["longitude"], text=details,
+                    marker_color_circle=color, marker_color_outside=TEXT,
+                )
+        finally:
+            conn.close()
+        if villes:
+            self.map_widget.set_position(villes[0]["latitude"], villes[0]["longitude"])
+            self.map_widget.set_zoom(5 if len(villes) > 1 else 8)
 
     # ---------------------------------------------------------- données
     def _villes(self):
@@ -537,6 +637,7 @@ class App(ctk.CTk):
             self.current = vrai_nom
             self.reload_cities()
             self.show_city(vrai_nom)
+            self.refresh_map()
             self.toast("Nouveau relevé enregistré ✓" if nouveau
                        else "Déjà à jour : relevé de cette heure déjà en base", GOOD if nouveau else SOFT)
 
@@ -566,6 +667,7 @@ class App(ctk.CTk):
             self.reload_cities()
             if self.current:
                 self.show_city(self.current)
+            self.refresh_map()
             self.toast(f"{ok} ville(s) actualisée(s)" + (f", {ko} en échec" if ko else " ✓"),
                        GOOD if not ko else BAD)
 
