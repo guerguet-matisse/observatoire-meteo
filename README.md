@@ -32,3 +32,26 @@ python pipeline.py Paris Lille            # collecte en ligne de commande
 ## Structure
 `models.py` Pydantic · `client.py` requests · `database.py` sqlite3 · `pipeline.py` · `metrics.py` métriques ·
 `main.py` FastAPI · `dashboard/app.py` Streamlit · `prometheus/` · `grafana/` · `docker-compose.yml`
+
+
+## Fonctionnalités avancées
+- Prévisions horaires sur 24 h et quotidiennes sur 7 jours.
+- Qualité de l'air : indice européen, PM2.5, PM10, NO₂ et ozone.
+- Alertes indicatives pour pluie, vent, UV, gel, chaleur et qualité de l'air.
+- Historique filtrable sur 24 h, 7 jours, 30 jours ou un an.
+- Export CSV des relevés et génération de bulletins PDF.
+- Endpoints FastAPI : `/previsions/{ville}` et `/qualite-air/{ville}`.
+- Cache mémoire de 10 minutes pour les prévisions et la qualité de l'air.
+
+Les seuils d'alerte sont informatifs et ne remplacent pas les vigilances officielles de Météo-France.
+Les prévisions et données de qualité de l'air sont fournies par Open-Meteo.
+
+
+## Version 3.0 — Radar, vigilance et comparaison
+- Radar animé des précipitations autour de la ville sélectionnée (images passées RainViewer, fond OpenStreetMap).
+- Centre de vigilance avec détection indicative de pluie, rafales, vent fort, gel, chaleur, UV et qualité de l'air.
+- Notifications Windows activables/désactivables et historisées dans SQLite, sans répétition d'une même alerte.
+- Comparateur de toutes les villes suivies sur les conditions actuelles et les extrêmes des 7 prochains jours.
+- API : `/alertes/{ville}` et `/radar/frames`.
+
+Le radar public RainViewer fournit les images passées, sans prévision radar future. Le service est sans clé et destiné à un usage personnel/éducatif. Les alertes de l'application sont indicatives et ne constituent pas les vigilances officielles de Météo-France. Attribution radar : RainViewer. Fond cartographique : © OpenStreetMap contributors.

@@ -2,6 +2,7 @@
 import os
 import sqlite3
 import sys
+from datetime import datetime, timedelta
 
 # La base est stockée à côté du .exe (ou du script), quel que soit le dossier de lancement.
 BASE_DIR = (
@@ -26,6 +27,21 @@ CREATE TABLE IF NOT EXISTS releves (
     vitesse_vent REAL NOT NULL,
     date_heure   TEXT NOT NULL,
     UNIQUE (ville_id, date_heure)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alert_history (
+    alert_key TEXT PRIMARY KEY,
+    ville TEXT NOT NULL,
+    code TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -98,3 +114,55 @@ def stats_ville(conn, nom: str):
            GROUP BY v.id""",
         (nom,),
     ).fetchone()
+
+
+def historique_ville(conn, nom: str, jours: int = 7, limite: int = 5000):
+    """Retourne les relevés récents d'une ville, du plus récent au plus ancien."""
+    jours = max(1, min(int(jours), 365))
+    limite = max(1, min(int(limite), 10000))
+    debut = (datetime.now() - timedelta(days=jours)).isoformat(timespec="minutes")
+    return conn.execute(
+        """SELECT r.id, v.nom AS ville, r.temperature, r.vitesse_vent, r.date_heure
+           FROM releves r JOIN villes v ON v.id = r.ville_id
+           WHERE v.nom = ? COLLATE NOCASE AND r.date_heure >= ?
+           ORDER BY r.date_heure DESC LIMIT ?""",
+        (nom, debut, limite),
+    ).fetchall()
+
+
+def get_setting(key: str, default: str = "") -> str:
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def register_alert_once(alert_key: str, ville: str, code: str, title: str,
+                        message: str, severity: str, created_at: str) -> bool:
+    """Enregistre une alerte une seule fois afin d'éviter les notifications répétées."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO alert_history
+               (alert_key, ville, code, title, message, severity, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (alert_key, ville, code, title, message, severity, created_at),
+        )
+        return cur.rowcount == 1
+
+
+def recent_alerts(limite: int = 50):
+    limite = max(1, min(int(limite), 200))
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT ville, code, title, message, severity, created_at "
+            "FROM alert_history ORDER BY created_at DESC LIMIT ?",
+            (limite,),
+        ).fetchall()

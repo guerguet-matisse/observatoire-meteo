@@ -15,6 +15,8 @@ from prometheus_fastapi_instrumentator import Instrumentator
 import client
 import database
 import pipeline
+import weather_features
+import radar_service
 from models import ReleveOut, StatsOut, VilleOut
 
 log = logging.getLogger("observatoire")
@@ -50,7 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="L'Observatoire Météo",
     description="Collecte la météo via Open-Meteo, la stocke dans SQLite et l'expose via une API documentée et observable.",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -132,3 +134,48 @@ def actualiser(ville: str):
     except client.ApiError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"ville": nom, "nouveau_releve": nouveau}
+
+
+@app.get("/previsions/{ville}", tags=["Prévisions"])
+def previsions_ville(ville: str):
+    """Prévisions météo horaires et quotidiennes sur sept jours."""
+    try:
+        place = client.geocoder(ville)
+        return weather_features.get_forecast(place.latitude, place.longitude)
+    except (client.ApiError, weather_features.WeatherServiceError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/qualite-air/{ville}", tags=["Qualité de l'air"])
+def qualite_air_ville(ville: str):
+    """Indice européen de qualité de l'air et principaux polluants."""
+    try:
+        place = client.geocoder(ville)
+        return weather_features.get_air_quality(place.latitude, place.longitude)
+    except (client.ApiError, weather_features.WeatherServiceError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/alertes/{ville}", tags=["Vigilance"])
+def alertes_ville(ville: str):
+    """Alertes indicatives calculées à partir des prévisions, non officielles."""
+    try:
+        place = client.geocoder(ville)
+        forecast = weather_features.get_forecast(place.latitude, place.longitude)
+        try:
+            air = weather_features.get_air_quality(place.latitude, place.longitude)
+        except weather_features.WeatherServiceError:
+            air = None
+        return {"ville": place.name, "alertes": weather_features.build_alerts(forecast, air),
+                "source": "Open-Meteo", "officiel": False}
+    except (client.ApiError, weather_features.WeatherServiceError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/radar/frames", tags=["Radar"])
+def radar_frames():
+    """Métadonnées des images radar RainViewer disponibles (passé récent)."""
+    try:
+        return radar_service.get_radar_manifest()
+    except radar_service.RadarServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
