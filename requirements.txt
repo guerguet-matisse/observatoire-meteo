@@ -6,3 +6,5 @@ requests
 tkintermapview>=1.29
 requests-cache>=1.2.0
 reportlab>=4.2
+Pillow>=10.0.0
+winotify>=1.1.0
