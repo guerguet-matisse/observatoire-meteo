@@ -86,6 +86,13 @@ def temp_color(t: float) -> str:
     return TEMP_STOPS[-1][1]
 
 
+def wind_color(v: float) -> str:
+    if v < 20: return GOOD
+    if v < 40: return "#ffd166"
+    if v < 60: return "#ff8a4c"
+    return BAD
+
+
 def wind_info(v: float):
     if v < 12:
         return "Calme", GOOD
@@ -446,6 +453,10 @@ class App(ctk.CTk):
         header = ctk.CTkFrame(self.map_view, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
         header.grid_columnconfigure(0, weight=1)
+        self.map_metric = ctk.StringVar(value="Température")
+        ctk.CTkOptionMenu(header, values=["Température", "Vent"], variable=self.map_metric,
+                          width=120, height=36, command=lambda _v: self.refresh_map()).grid(
+                              row=0, column=1, rowspan=2, padx=8, sticky="e")
         ctk.CTkLabel(header, text="Carte météorologique", font=font(30, "bold"),
                      text_color=TEXT).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(header, text="Clique sur un marqueur pour consulter le dernier relevé",
@@ -454,7 +465,7 @@ class App(ctk.CTk):
                       corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER,
                       border_width=1, border_color=BORDER, text_color=TEXT,
                       font=font(13, "bold"), command=self.show_dashboard).grid(
-                          row=0, column=1, rowspan=2, sticky="e")
+                          row=0, column=2, rowspan=2, sticky="e")
 
         map_panel = ctk.CTkFrame(self.map_view, fg_color=CARD, corner_radius=20,
                                  border_width=1, border_color=BORDER)
@@ -516,7 +527,7 @@ class App(ctk.CTk):
                         f"Vent : {vent:.0f} km/h\n"
                         f"Relevé : {fmt_dt(releve['date_heure'])}"
                     )
-                    color = temp_color(temperature)
+                    color = wind_color(vent) if getattr(self, "map_metric", None) and self.map_metric.get() == "Vent" else temp_color(temperature)
                 else:
                     details = f"{ville['nom']}\nAucun relevé disponible"
                     color = MUTED
@@ -846,7 +857,8 @@ class App(ctk.CTk):
             line = (f"{day} · {weather_features.weather_code_label(val('weather_code'))} · "
                 f"{val('temperature_2m_min')} / {val('temperature_2m_max')} °C · "
                 f"Pluie {val('precipitation_probability_max')} % ({val('precipitation_sum')} mm) · "
-                f"Vent {val('wind_speed_10m_max')} km/h · UV {val('uv_index_max')}")
+                f"Vent {val('wind_speed_10m_max')} km/h · UV {val('uv_index_max')} · "
+                f"Lever {val('sunrise')} · Coucher {val('sunset')}")
             ctk.CTkLabel(content, text=line, font=font(12), text_color=SOFT,
                          anchor="w", wraplength=830).grid(row=6+i, column=0, sticky="ew", pady=5)
         ctk.CTkLabel(content, text="PRÉVISIONS HORAIRES · 24 PROCHAINES HEURES",

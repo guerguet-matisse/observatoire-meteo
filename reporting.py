@@ -40,7 +40,7 @@ def create_pdf_report(city: str, forecast: dict, air: dict | None, destination: 
     if air and isinstance(air.get("current"), dict):
         a = air["current"]
         story.append(Paragraph(f"Indice européen : {a.get('european_aqi','—')} · PM2.5 : {a.get('pm2_5','—')} ug/m3 · "
-            f"PM10 : {a.get('pm10','—')} µg/m³ · NO2 : {a.get('nitrogen_dioxide','—')} ug/m3 · "
+            f"PM10 : {a.get('pm10','—')} ug/m3 · NO2 : {a.get('nitrogen_dioxide','—')} ug/m3 · "
             f"Ozone : {a.get('ozone','—')} µg/m³", styles["BodyText"]))
     else:
         story.append(Paragraph("Données non disponibles.", styles["BodyText"]))
