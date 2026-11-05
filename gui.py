@@ -11,7 +11,31 @@ import customtkinter as ctk
 
 try:
     import tkintermapview
-except ImportError:  # La carte reste facultative si la dépendance n'est pas installée.
+    import tkintermapview.map_widget as map_widget_module
+    import requests
+    import requests_cache
+    from types import SimpleNamespace
+
+    # TkinterMapView uses a generic User-Agent by default. OpenStreetMap
+    # requires desktop applications to identify themselves and cache tiles.
+    _tile_session = requests_cache.CachedSession(
+        cache_name="observatoire_meteo_tiles",
+        backend="sqlite",
+        expire_after=7 * 24 * 60 * 60,
+        cache_control=True,
+    )
+
+    def _identified_tile_request(url, **kwargs):
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers["User-Agent"] = "ObservatoireMeteo/1.0 (desktop application)"
+        return _tile_session.get(url, headers=headers, **kwargs)
+
+    # Patch only the HTTP client used by the map widget, not the weather API.
+    map_widget_module.requests = SimpleNamespace(
+        get=_identified_tile_request,
+        exceptions=requests.exceptions,
+    )
+except ImportError:  # La carte reste facultative si ses dépendances manquent.
     tkintermapview = None
 
 import client
