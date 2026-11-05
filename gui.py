@@ -45,6 +45,7 @@ import database
 import pipeline
 import weather_features
 import reporting
+import radar_service
 
 # ------------------------------------------------------------------ palette
 BG = "#0b0e1a"
@@ -274,8 +275,13 @@ class App(ctk.CTk):
         self.busy = False
         self._q: queue.Queue = queue.Queue()
         self._toast_job = None
+        self._radar_frames = []
+        self._radar_playing = False
+        self._radar_job = None
+        self.alerts_enabled = False
 
         database.init_db()
+        self.alerts_enabled = database.get_setting("windows_alerts", "0") == "1"
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self._build_sidebar()
@@ -291,6 +297,7 @@ class App(ctk.CTk):
 
         self.after(100, self._poll)
         self.after(self.AUTO_MS, self._auto_tick)
+        self.after(30_000, self._alert_tick)
 
     # ---------------------------------------------------------- construction
     def _build_sidebar(self):
@@ -352,6 +359,23 @@ class App(ctk.CTk):
                                         border_width=1, border_color=BORDER, text_color=SOFT,
                                         font=font(12), command=self.export_csv)
         self.export_btn.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.radar_btn = ctk.CTkButton(foot, text="◉  Radar des précipitations", height=36,
+            corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER, border_width=1,
+            border_color=BORDER, text_color=SOFT, font=font(12), command=self.show_radar)
+        self.radar_btn.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        self.compare_btn = ctk.CTkButton(foot, text="⇄  Comparer les villes", height=36,
+            corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER, border_width=1,
+            border_color=BORDER, text_color=SOFT, font=font(12), command=self.show_city_comparison)
+        self.compare_btn.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        self.alert_center_btn = ctk.CTkButton(foot, text="⚠  Centre de vigilance", height=36,
+            corner_radius=12, fg_color=CARD, hover_color=CARD_HOVER, border_width=1,
+            border_color=BORDER, text_color=SOFT, font=font(12), command=self.show_alert_center)
+        self.alert_center_btn.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        self.alert_switch = ctk.CTkSwitch(foot, text="Notifications Windows", font=font(12),
+            text_color=MUTED, progress_color=ACCENT, command=self.toggle_alerts)
+        self.alert_switch.grid(row=8, column=0, sticky="w", pady=(10, 0))
+        if self.alerts_enabled:
+            self.alert_switch.select()
 
     def _build_main(self):
         main = ctk.CTkFrame(self, fg_color="transparent")
@@ -890,6 +914,291 @@ class App(ctk.CTk):
             self.toast(f"Échec de création du PDF : {exc}", BAD)
             return
         self.toast("Bulletin PDF créé ✓", GOOD)
+
+    def _alert_tick(self):
+        if self.alerts_enabled and not self.busy:
+            self._check_alerts(manual=False)
+        self.after(20 * 60 * 1000, self._alert_tick)
+
+    def show_radar(self):
+        if self.busy:
+            self.toast("Une opération est déjà en cours.", SOFT)
+            return
+        cities = self._villes()
+        if not cities:
+            self.toast("Ajoute une ville avant d'ouvrir le radar.", BAD)
+            return
+        city = next((item for item in cities if item["nom"] == self.current), cities[0])
+        window = ctk.CTkToplevel(self)
+        window.title(f"Radar des précipitations · {city['nom']}")
+        window.geometry("760x720")
+        window.minsize(620, 620)
+        window.configure(fg_color=BG)
+        window.transient(self)
+        self.radar_window = window
+        window.protocol("WM_DELETE_WINDOW", self._close_radar)
+        ctk.CTkLabel(window, text=f"Radar des précipitations · {city['nom']}",
+                     font=font(22, "bold"), text_color=TEXT).pack(pady=(18, 4))
+        self.radar_status = ctk.CTkLabel(window, text="Chargement des images radar…",
+                                         font=font(12), text_color=SOFT)
+        self.radar_status.pack(pady=(0, 10))
+        self.radar_image_label = ctk.CTkLabel(window, text="Téléchargement…",
+            width=512, height=512, fg_color=CARD, corner_radius=12)
+        self.radar_image_label.pack(padx=18, pady=8)
+        controls = ctk.CTkFrame(window, fg_color="transparent")
+        controls.pack(fill="x", padx=28, pady=8)
+        ctk.CTkButton(controls, text="◀", width=44, command=lambda: self._show_radar_frame(
+            max(0, self.radar_index - 1))).pack(side="left", padx=4)
+        self.radar_play_btn = ctk.CTkButton(controls, text="▶ Lecture", width=110,
+                                             command=self.toggle_radar_playback)
+        self.radar_play_btn.pack(side="left", padx=4)
+        ctk.CTkButton(controls, text="▶|", width=44, command=lambda: self._show_radar_frame(
+            min(len(self._radar_frames) - 1, self.radar_index + 1))).pack(side="left", padx=4)
+        self.radar_slider = ctk.CTkSlider(controls, from_=0, to=1, number_of_steps=1,
+            command=lambda value: self._show_radar_frame(int(float(value))))
+        self.radar_slider.pack(side="left", fill="x", expand=True, padx=12)
+        ctk.CTkLabel(window,
+            text="Radar RainViewer · Fond © OpenStreetMap contributors",
+            font=font(10), text_color=MUTED).pack(pady=(0, 12))
+        self.radar_index = 0
+        self._run(lambda: radar_service.get_radar_animation(city["latitude"], city["longitude"]),
+                  self._radar_loaded)
+
+    def _radar_loaded(self, frames, error):
+        if not hasattr(self, "radar_window") or not self.radar_window.winfo_exists():
+            return
+        if error:
+            self.radar_status.configure(text=f"Radar indisponible : {error}")
+            self.radar_image_label.configure(text="Aucune image disponible", image=None)
+            return
+        self._radar_frames = frames
+        self.radar_index = len(frames) - 1
+        self.radar_slider.configure(to=max(1, len(frames) - 1),
+                                    number_of_steps=max(1, len(frames) - 1))
+        self.radar_slider.set(self.radar_index)
+        self._show_radar_frame(self.radar_index)
+
+    def _show_radar_frame(self, index):
+        if not self._radar_frames or not hasattr(self, "radar_window") or not self.radar_window.winfo_exists():
+            return
+        self.radar_index = max(0, min(int(index), len(self._radar_frames) - 1))
+        frame = self._radar_frames[self.radar_index]
+        self._radar_image = ctk.CTkImage(light_image=frame["image"], dark_image=frame["image"],
+                                         size=(512, 512))
+        self.radar_image_label.configure(image=self._radar_image, text="")
+        stamp = datetime.fromtimestamp(frame["time"]).strftime("%d/%m/%Y à %H:%M")
+        self.radar_status.configure(text=f"Image {self.radar_index + 1}/{len(self._radar_frames)} · {stamp}")
+        if abs(float(self.radar_slider.get()) - self.radar_index) > 0.01:
+            self.radar_slider.set(self.radar_index)
+
+    def toggle_radar_playback(self):
+        self._radar_playing = not self._radar_playing
+        self.radar_play_btn.configure(text="Ⅱ Pause" if self._radar_playing else "▶ Lecture")
+        if self._radar_playing:
+            self._radar_tick()
+        elif self._radar_job:
+            self.after_cancel(self._radar_job)
+            self._radar_job = None
+
+    def _radar_tick(self):
+        if not self._radar_playing or not self._radar_frames:
+            return
+        self._show_radar_frame((self.radar_index + 1) % len(self._radar_frames))
+        self._radar_job = self.after(800, self._radar_tick)
+
+    def _close_radar(self):
+        self._radar_playing = False
+        if self._radar_job:
+            self.after_cancel(self._radar_job)
+            self._radar_job = None
+        if hasattr(self, "radar_window") and self.radar_window.winfo_exists():
+            self.radar_window.destroy()
+
+    def show_city_comparison(self):
+        if self.busy:
+            self.toast("Une opération est déjà en cours.", SOFT)
+            return
+        cities = self._villes()
+        if len(cities) < 2:
+            self.toast("Ajoute au moins deux villes pour les comparer.", BAD)
+            return
+        window = ctk.CTkToplevel(self)
+        window.title("Comparateur météorologique")
+        window.geometry("1050x680")
+        window.minsize(800, 540)
+        window.configure(fg_color=BG)
+        window.transient(self)
+        self.compare_window = window
+        header = ctk.CTkFrame(window, fg_color="transparent")
+        header.pack(fill="x", padx=22, pady=(20, 8))
+        ctk.CTkLabel(header, text="Comparateur de villes", font=font(24, "bold"),
+                     text_color=TEXT).pack(side="left")
+        self.compare_status = ctk.CTkLabel(window, text="Récupération des prévisions…",
+                                           font=font(12), text_color=SOFT)
+        self.compare_status.pack(anchor="w", padx=24, pady=(0, 8))
+        self.compare_content = ctk.CTkScrollableFrame(window, fg_color=BG)
+        self.compare_content.pack(fill="both", expand=True, padx=16, pady=12)
+        def load():
+            results = []
+            for city in cities:
+                try:
+                    results.append((city["nom"], weather_features.get_forecast(
+                        city["latitude"], city["longitude"]), None))
+                except Exception as exc:
+                    results.append((city["nom"], None, str(exc)))
+            return results
+        self._run(load, self._comparison_loaded)
+
+    def _comparison_loaded(self, results, error):
+        if not hasattr(self, "compare_window") or not self.compare_window.winfo_exists():
+            return
+        if error:
+            self.compare_status.configure(text=f"Erreur : {error}")
+            return
+        for child in self.compare_content.winfo_children():
+            child.destroy()
+        headers = ["VILLE", "MAINTENANT", "MIN. 7 J", "MAX. 7 J", "PLUIE MAX.", "VENT MAX."]
+        for col, title in enumerate(headers):
+            ctk.CTkLabel(self.compare_content, text=title, font=font(11, "bold"),
+                         text_color=MUTED).grid(row=0, column=col, sticky="ew", padx=8, pady=12)
+            self.compare_content.grid_columnconfigure(col, weight=1)
+        ok = 0
+        for row, (name, forecast, error_text) in enumerate(results, start=1):
+            card = ctk.CTkFrame(self.compare_content, fg_color=CARD, corner_radius=12)
+            card.grid(row=row, column=0, columnspan=6, sticky="ew", padx=4, pady=5)
+            for col in range(6):
+                card.grid_columnconfigure(col, weight=1)
+            if forecast is None:
+                values = [name, "Indisponible", "—", "—", "—", error_text or "—"]
+            else:
+                current = forecast.get("current", {})
+                daily = forecast.get("daily", {})
+                mins = daily.get("temperature_2m_min", [])
+                maxs = daily.get("temperature_2m_max", [])
+                rains = daily.get("precipitation_probability_max", [])
+                winds = daily.get("wind_speed_10m_max", [])
+                values = [name, f"{current.get('temperature_2m','—')} °C",
+                    f"{min(mins):.0f} °C" if mins else "—",
+                    f"{max(maxs):.0f} °C" if maxs else "—",
+                    f"{max(rains):.0f} %" if rains else "—",
+                    f"{max(winds):.0f} km/h" if winds else "—"]
+                ok += 1
+            for col, value in enumerate(values):
+                ctk.CTkLabel(card, text=str(value), font=font(12, "bold" if col == 0 else "normal"),
+                             text_color=TEXT if col == 0 else SOFT, anchor="w").grid(
+                                 row=0, column=col, sticky="ew", padx=8, pady=14)
+        self.compare_status.configure(text=f"{ok}/{len(results)} villes comparées · prévisions sur 7 jours")
+
+    def show_alert_center(self):
+        if hasattr(self, "alert_window") and self.alert_window.winfo_exists():
+            self.alert_window.lift()
+            self._refresh_alert_list()
+            return
+        window = ctk.CTkToplevel(self)
+        window.title("Centre de vigilance")
+        window.geometry("820x650")
+        window.minsize(680, 480)
+        window.configure(fg_color=BG)
+        window.transient(self)
+        self.alert_window = window
+        header = ctk.CTkFrame(window, fg_color="transparent")
+        header.pack(fill="x", padx=22, pady=(20, 8))
+        ctk.CTkLabel(header, text="Centre de vigilance", font=font(24, "bold"),
+                     text_color=TEXT).pack(side="left")
+        ctk.CTkButton(header, text="Vérifier maintenant", fg_color=ACCENT,
+                      command=self.check_alerts_now).pack(side="right")
+        self.alert_status = ctk.CTkLabel(window,
+            text="Alertes calculées à partir des prévisions Open-Meteo (non officielles).",
+            font=font(12), text_color=MUTED)
+        self.alert_status.pack(anchor="w", padx=24, pady=(0, 8))
+        self.alert_content = ctk.CTkScrollableFrame(window, fg_color=BG)
+        self.alert_content.pack(fill="both", expand=True, padx=16, pady=12)
+        self._refresh_alert_list()
+
+    def _refresh_alert_list(self):
+        if not hasattr(self, "alert_window") or not self.alert_window.winfo_exists():
+            return
+        for child in self.alert_content.winfo_children():
+            child.destroy()
+        alerts = database.recent_alerts(60)
+        if not alerts:
+            ctk.CTkLabel(self.alert_content, text="Aucune alerte enregistrée.",
+                         font=font(14), text_color=SOFT).pack(pady=24)
+            return
+        colors = {"danger": BAD, "warning": "#ffad66", "watch": "#ffd166"}
+        for alert in alerts:
+            card = ctk.CTkFrame(self.alert_content, fg_color=CARD, corner_radius=12)
+            card.pack(fill="x", padx=4, pady=5)
+            ctk.CTkLabel(card, text=f"{alert['ville']} · {alert['title']}",
+                         font=font(13, "bold"), text_color=colors.get(alert["severity"], SOFT),
+                         anchor="w").pack(fill="x", padx=14, pady=(12, 3))
+            ctk.CTkLabel(card, text=f"{alert['message']}\n{alert['created_at']}",
+                         font=font(11), text_color=SOFT, anchor="w", justify="left",
+                         wraplength=730).pack(fill="x", padx=14, pady=(0, 12))
+
+    def toggle_alerts(self):
+        self.alerts_enabled = bool(self.alert_switch.get())
+        database.set_setting("windows_alerts", "1" if self.alerts_enabled else "0")
+        self.toast("Notifications météo activées." if self.alerts_enabled else
+                   "Notifications météo désactivées.", GOOD if self.alerts_enabled else SOFT)
+        if self.alerts_enabled:
+            self.after(1000, self.check_alerts_now)
+
+    def check_alerts_now(self):
+        self._check_alerts(manual=True)
+
+    def _check_alerts(self, manual=False):
+        cities = self._villes()
+        if not cities:
+            if manual:
+                self.toast("Aucune ville à surveiller.", BAD)
+            return
+        if self.busy:
+            if manual:
+                self.toast("Une opération est déjà en cours. Réessaie dans un instant.", SOFT)
+            return
+        def work():
+            new_alerts = []
+            for city in cities:
+                try:
+                    forecast = weather_features.get_forecast(city["latitude"], city["longitude"])
+                    try:
+                        air = weather_features.get_air_quality(city["latitude"], city["longitude"])
+                    except weather_features.WeatherServiceError:
+                        air = None
+                    for item in weather_features.build_alerts(forecast, air):
+                        key = f"{city['nom']}|{item['code']}|{item['validity']}"
+                        created = datetime.now().isoformat(timespec="minutes")
+                        if database.register_alert_once(key, city["nom"], item["code"], item["title"],
+                                item["message"], item["severity"], created):
+                            new_alerts.append((city["nom"], item))
+                except weather_features.WeatherServiceError:
+                    continue
+            return new_alerts
+        def done(result, error):
+            if error:
+                if hasattr(self, "alert_window") and self.alert_window.winfo_exists():
+                    self.alert_status.configure(text=f"Vérification impossible : {error}")
+                if manual:
+                    self.toast(f"Échec de la vérification : {error}", BAD)
+                return
+            for city_name, item in result:
+                self._notify_windows(city_name, item)
+            self._refresh_alert_list()
+            if hasattr(self, "alert_window") and self.alert_window.winfo_exists():
+                self.alert_status.configure(text=f"Vérification terminée · {len(result)} nouvelle(s) alerte(s)")
+            if manual:
+                self.toast(f"Vérification terminée : {len(result)} nouvelle(s) alerte(s).",
+                           GOOD if not result else "#ffd166")
+        self._run(work, done)
+
+    def _notify_windows(self, city_name, item):
+        try:
+            from winotify import Notification
+            Notification(app_id="Observatoire Météo",
+                title=f"{item['title']} · {city_name}", msg=item["message"]).show()
+        except Exception:
+            return
 
     def _auto_tick(self):
         if self.auto.get() and not self.busy:
